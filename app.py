@@ -4,16 +4,14 @@ import requests
 
 app = Flask(__name__)
 
-# Mengambil token Hugging Face & Port dari environment variable Railway
+# Ambil token dan port dari pengaturan internal Railway
 HF_TOKEN = os.environ.get("HF_TOKEN")
 PORT = int(os.environ.get("PORT", 8080))
 
-# Kita gunakan model open-source gratis yang andal untuk chat
-MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
-API_URL = f"https://huggingface.co{MODEL_ID}"
+# ALAMAT URL YANG SUDAH DIPERBAIKI (TIDAK AKAN TYPO LAGI)
+API_URL = "https://huggingface.co"
 headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-# Desain tampilan chat web sederhana (HTML & CSS)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -30,7 +28,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <h2>🤖 AI Chatbot Bakri</h2>
-    <div class="chat-box" id="chatBox">
+    <div class="chat-box">
         {% if user_msg %}
             <div class="user"><b>Kamu:</b> {{ user_msg }}</div>
             <div class="ai"><b>AI:</b> {{ ai_reply }}</div>
@@ -51,27 +49,27 @@ def home():
     if request.method == "POST":
         user_msg = request.form["message"]
         
-        # Format prompt agar model mengerti ini adalah percakapan instruksi
         payload = {
             "inputs": f"<s>[INST] {user_msg} [/INST]",
             "parameters": {"max_new_tokens": 250, "temperature": 0.7}
         }
         
-        # Menembak API Hugging Face
-        response = requests.post(API_URL, headers=headers, json=payload)
-        
         try:
-            # Mengambil teks jawaban dari respon JSON Hugging Face
+            response = requests.post(API_URL, headers=headers, json=payload)
             result = response.json()
-            ai_reply = result[0]['generated_text'].split("[/INST]")[-1].strip()
-        except Exception:
-            ai_reply = "Maaf, server AI sedang sibuk atau token belum diatur dengan benar."
+            
+            # Mengantisipasi jika model sedang loading di server Hugging Face
+            if isinstance(result, dict) and "estimated_time" in result:
+                ai_reply = f"Server AI sedang bersiap (loading). Silakan coba kirim ulang pesan ini dalam 20 detik."
+            else:
+                ai_reply = result[0]['generated_text'].split("[/INST]")[-1].strip()
+        except Exception as e:
+            ai_reply = f"Terjadi kendala koneksi ke AI: {str(e)}"
 
         return render_template_string(HTML_TEMPLATE, user_msg=user_msg, ai_reply=ai_reply)
         
     return render_template_string(HTML_TEMPLATE)
 
 if __name__ == "__main__":
-    # Pastikan mengambil port dari Railway dan menggunakan host "0.0.0.0"
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    # Wajib menggunakan host="0.0.0.0" agar bisa dibuka publik di Railway
+    app.run(host="0.0.0.0", port=PORT)
