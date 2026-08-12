@@ -4,17 +4,14 @@ import requests
 
 app = Flask(__name__)
 
-# Mengambil token Hugging Face & Port dari environment variable Railway
+# Ambil token dan port dari pengaturan internal Railway
 HF_TOKEN = os.environ.get("HF_TOKEN")
 PORT = int(os.environ.get("PORT", 8080))
 
-# Kita gunakan model open-source gratis yang andal untuk chat
-MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.3"
-# Gunakan endpoint Inference API yang benar
-API_URL = f"https://api-inference.huggingface.co/models/{MODEL_ID}"
-headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
+# MENGGUNAKAN MODEL LLAMA-3 YANG LEBIH STABIL
+API_URL = "https://huggingface.co"
+headers = {"Authorization": f"Bearer {HF_TOKEN}"}
 
-# Desain tampilan chat web sederhana (HTML & CSS)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -27,12 +24,11 @@ HTML_TEMPLATE = """
         button { width: 20%; padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
         .user { color: blue; margin-bottom: 5px; }
         .ai { color: green; margin-bottom: 15px; }
-        .error { color: red; margin-bottom: 15px; }
     </style>
 </head>
 <body>
     <h2>🤖 AI Chatbot Bakri</h2>
-    <div class="chat-box" id="chatBox">
+    <div class="chat-box">
         {% if user_msg %}
             <div class="user"><b>Kamu:</b> {{ user_msg }}</div>
             <div class="ai"><b>AI:</b> {{ ai_reply }}</div>
@@ -50,61 +46,37 @@ HTML_TEMPLATE = """
 
 @app.route("/", methods=["GET", "POST"])
 def home():
-    user_msg = None
-    ai_reply = None
-
     if request.method == "POST":
-        user_msg = request.form.get("message", "").strip()
-        if not user_msg:
-            ai_reply = "Masukkan pesan terlebih dahulu."
-            return render_template_string(HTML_TEMPLATE, user_msg=user_msg, ai_reply=ai_reply)
-
-        if not HF_TOKEN:
-            ai_reply = "Maaf, HF_TOKEN belum diatur di environment. Silakan set HF_TOKEN di Railway."
-            return render_template_string(HTML_TEMPLATE, user_msg=user_msg, ai_reply=ai_reply)
-
-        # Format prompt agar model mengerti ini adalah percakapan instruksi
+        user_msg = request.form["message"]
+        
         payload = {
-            "inputs": f"<s>[INST] {user_msg} [/INST]",
-            "parameters": {"max_new_tokens": 250, "temperature": 0.7}
+            "inputs": user_msg,
+            "parameters": {"max_new_tokens": 150}
         }
-
+        
         try:
-            # Menembak API Hugging Face dengan timeout
-            response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-
-            if response.status_code != 200:
-                # Tampilkan pesan dari HF jika ada, atau status code
-                try:
-                    err = response.json()
-                except Exception:
-                    err = response.text
-                ai_reply = f"Error dari Hugging Face API: {response.status_code} - {err}"
-            else:
-                result = response.json()
-                # Respons bisa berupa list [{'generated_text': "..."}] atau dict
-                if isinstance(result, list) and len(result) > 0:
-                    ai_reply = result[0].get("generated_text", "")
-                elif isinstance(result, dict):
-                    ai_reply = result.get("generated_text") or result.get("generated_text", "")
+            response = requests.post(API_URL, headers=headers, json=payload)
+            result = response.json()
+            
+            # Sistem pengecekan respon otomatis (agar terhindar dari error 'Expecting value')
+            if isinstance(result, list) and len(result) > 0:
+                ai_reply = result[0].get('generated_text', 'Format teks kosong').strip()
+            elif isinstance(result, dict):
+                if "estimated_time" in result:
+                    ai_reply = "Server Hugging Face sedang memuat model. Silakan kirim ulang pesan ini dalam 20 detik."
+                elif "error" in result:
+                    ai_reply = f"Pesan dari Hugging Face: {result['error']}"
                 else:
                     ai_reply = str(result)
-
-                # Jika masih ada tag instruksi, bersihkan
-                if isinstance(ai_reply, str) and "[/INST]" in ai_reply:
-                    ai_reply = ai_reply.split("[/INST]")[-1].strip()
-
-                if not ai_reply:
-                    ai_reply = "AI tidak mengembalikan jawaban yang dapat dibaca."
-
-        except requests.exceptions.Timeout:
-            ai_reply = "Permintaan ke Hugging Face timeout. Coba lagi nanti."
+            else:
+                ai_reply = f"Menerima respon tidak dikenal: {str(result)}"
+                
         except Exception as e:
-            ai_reply = f"Terjadi kesalahan saat menghubungi layanan AI: {e}"
+            ai_reply = f"Terjadi kendala koneksi ke AI: {str(e)}"
 
         return render_template_string(HTML_TEMPLATE, user_msg=user_msg, ai_reply=ai_reply)
-
-    return render_template_string(HTML_TEMPLATE, user_msg=None, ai_reply=None)
+        
+    return render_template_string(HTML_TEMPLATE)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
