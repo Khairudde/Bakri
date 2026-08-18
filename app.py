@@ -10,7 +10,7 @@ from openai import OpenAI
 JOINGONKA_KEY = os.environ.get("JOINGONKA_API_KEY")
 BYBIT_KEY = os.environ.get("BYBIT_API_KEY", "")
 BYBIT_SECRET = os.environ.get("BYBIT_API_SECRET", "")
-BYBIT_BASE = "https://api-demo.bybit.com"   # Demo
+BYBIT_BASE = "https://api-demo.bybit.com"   # Demo Account
 
 if not JOINGONKA_KEY:
     raise ValueError("JOINGONKA_API_KEY belum di-set di Variables Railway")
@@ -29,8 +29,18 @@ def bybit_request(method, endpoint, params=None):
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
     
-    query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())]) if params else ""
-    param_str = timestamp + BYBIT_KEY + recv_window + query_string
+    if method == "GET":
+        query_string = "&".join([f"{k}={v}" for k, v in sorted(params.items())]) if params else ""
+        param_str = timestamp + BYBIT_KEY + recv_window + query_string
+        url_payload = f"{BYBIT_BASE}{endpoint}?{query_string}" if query_string else f"{BYBIT_BASE}{endpoint}"
+        body_payload = None
+    else:
+        # POST Request (Perlu JSON String untuk Body Signature)
+        import json
+        body_payload = json.dumps(params)
+        param_str = timestamp + BYBIT_KEY + recv_window + body_payload
+        url_payload = f"{BYBIT_BASE}{endpoint}"
+
     signature = hmac.new(
         BYBIT_SECRET.encode("utf-8"),
         param_str.encode("utf-8"),
@@ -45,15 +55,11 @@ def bybit_request(method, endpoint, params=None):
         "Content-Type": "application/json"
     }
 
-    url = f"{BYBIT_BASE}{endpoint}"
-    if query_string:
-        url += f"?{query_string}"
-
     try:
         if method == "GET":
-            res = requests.get(url, headers=headers, timeout=10)
+            res = requests.get(url_payload, headers=headers, timeout=10)
         else:
-            res = requests.post(url, headers=headers, json=params, timeout=10)
+            res = requests.post(url_payload, headers=headers, data=body_payload, timeout=10)
         return res.json()
     except Exception as e:
         return {"error": str(e)}
@@ -64,21 +70,55 @@ def get_balance():
 def get_positions():
     return bybit_request("GET", "/v5/position/list", {"category": "linear", "settleCoin": "USDT"})
 
-# ===== Chat Function =====
+# Fungsi Buka Posisi (Trading)
+def place_order(symbol, side, qty):
+    """
+    side: 'Buy' atau 'Sell'
+    qty: jumlah (misal '0.01' untuk BTCUSDT)
+    """
+    params = {
+        "category": "linear",
+        "symbol": symbol.upper(),
+        "side": side,
+        "orderType": "Market",
+        "qty": str(qty),
+        "timeInForce": "GTC"
+    }
+    return bybit_request("POST", "/v5/order/create", params)
+
+# ===== Chat Function dengan Streaming =====
 def chat(message, history, model_name):
     if not message or not str(message).strip():
-        return "Pesan kosong."
+        yield "Pesan kosong."
+        return
 
-    lower_msg = message.lower()
+    lower_msg = message.lower().strip()
 
+    # 1. Command Cek Saldo
     if "saldo" in lower_msg or "balance" in lower_msg:
         bal = get_balance()
-        return f"📊 Hasil cek saldo Demo:\n\n```json\n{bal}\n```"
+        yield f"📊 Hasil cek saldo Demo:\n\n```json\n{bal}\n```"
+        return
 
+    # 2. Command Cek Posisi
     if "posisi" in lower_msg or "position" in lower_msg:
         pos = get_positions()
-        return f"📈 Posisi saat ini:\n\n```json\n{pos}\n```"
+        yield f"📈 Posisi saat ini:\n\n```json\n{pos}\n```"
+        return
 
+    # 3. Command Trading (Contoh: "buy btcusdt 0.001" atau "sell ethusdt 0.01")
+    parts = lower_msg.split()
+    if len(parts) == 3 and parts[0] in ["buy", "sell"]:
+        side = "Buy" if parts[0] == "buy" else "Sell"
+        symbol = parts[1].upper()
+        qty = parts[2]
+        
+        yield f"⏳ Sedang mengirim order {side} {symbol} sejumlah {qty}..."
+        order_res = place_order(symbol, side, qty)
+        yield f"🚀 Response Order Demo Bybit:\n\n```json\n{order_res}\n```"
+        return
+
+    # 4. Chat ke LLM Joingonka
     messages = []
     if history:
         for item in history:
@@ -96,16 +136,23 @@ def chat(message, history, model_name):
             model=model_name,
             messages=messages,
             temperature=0.7,
-            max_tokens=2048
+            max_tokens=2048,
+            stream=True
         )
-        return response.choices[0].message.content
+        
+        partial_text = ""
+        for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                partial_text += chunk.choices[0].delta.content
+                yield partial_text
+                
     except Exception as e:
-        return f"❌ Error LLM:\n\n{type(e).__name__}: {str(e)}"
+        yield f"❌ Error LLM:\n\n{type(e).__name__}: {str(e)}"
 
 # ===== UI =====
 with gr.Blocks(title="Gonka + Bybit Demo") as demo:
-    gr.Markdown("# 🤖 Gonka AI + Bybit Demo")
-    gr.Markdown("Bisa ngobrol, cek saldo, dan cek posisi (Demo Account)")
+    gr.Markdown("# 🤖 Gonka AI + Bybit Demo Trader")
+    gr.Markdown("Bisa ngobrol, cek saldo, cek posisi, dan **buka order trading**!")
 
     model_dropdown = gr.Dropdown(
         choices=[
@@ -121,10 +168,10 @@ with gr.Blocks(title="Gonka + Bybit Demo") as demo:
         fn=chat,
         additional_inputs=[model_dropdown],
         examples=[
-            ["Halo", "MiniMaxAI/MiniMax-M2.7"],
+            ["buy btcusdt 0.001", "MiniMaxAI/MiniMax-M2.7"],
+            ["sell btcusdt 0.001", "MiniMaxAI/MiniMax-M2.7"],
             ["Cek saldo saya", "MiniMaxAI/MiniMax-M2.7"],
-            ["Lihat posisi saya", "MiniMaxAI/MiniMax-M2.7"],
-            ["Analisis BTC sekarang", "MiniMaxAI/MiniMax-M2.7"]
+            ["Lihat posisi saya", "MiniMaxAI/MiniMax-M2.7"]
         ]
     )
 
