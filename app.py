@@ -1,82 +1,129 @@
+import gradio as gr
+from openai import OpenAI
 import os
-from flask import Flask, request, render_template_string
+import spaces
+import time
+import hmac
+import hashlib
 import requests
+from urllib.parse import urlencode
 
-app = Flask(__name__)
+# ===== Config =====
+JOINGONKA_KEY = os.environ.get("JOINGONKA_API_KEY")
+BYBIT_KEY = os.environ.get("BYBIT_API_KEY")
+BYBIT_SECRET = os.environ.get("BYBIT_API_SECRET")
+BYBIT_BASE = "https://api-demo.bybit.com"   # Demo
 
-# Ambil token dan port dari pengaturan internal Railway
-HF_TOKEN = os.environ.get("HF_TOKEN")
-PORT = int(os.environ.get("PORT", 8080))
+if not JOINGONKA_KEY:
+    raise ValueError("JOINGONKA_API_KEY belum di-set")
 
-# MENGGUNAKAN MODEL LLAMA-3 YANG LEBIH STABIL
-API_URL = "https://huggingface.co"
-headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+client = OpenAI(
+    base_url="https://gate.joingonka.ai/v1",
+    api_key=JOINGONKA_KEY
+)
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>AI Chatbot Bakri</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; box-shadow: 0 0 10px rgba(0,0,0,0.1); border-radius: 8px; }
-        .chat-box { height: 300px; border: 1px solid #ccc; overflow-y: scroll; padding: 10px; margin-bottom: 20px; background: #f9f9f9; border-radius: 4px; }
-        input[type="text"] { width: 75%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }
-        button { width: 20%; padding: 10px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        .user { color: blue; margin-bottom: 5px; }
-        .ai { color: green; margin-bottom: 15px; }
-    </style>
-</head>
-<body>
-    <h2>🤖 AI Chatbot Bakri</h2>
-    <div class="chat-box">
-        {% if user_msg %}
-            <div class="user"><b>Kamu:</b> {{ user_msg }}</div>
-            <div class="ai"><b>AI:</b> {{ ai_reply }}</div>
-        {% else %}
-            <div class="ai"><b>AI:</b> Halo! Ada yang bisa saya bantu hari ini?</div>
-        {% endif %}
-    </div>
-    <form method="POST">
-        <input type="text" name="message" placeholder="Ketik pesan di sini..." required autocomplete="off">
-        <button type="submit">Kirim</button>
-    </form>
-</body>
-</html>
-"""
+# ===== Bybit Helper =====
+def bybit_request(method, endpoint, params=None):
+    if not BYBIT_KEY or not BYBIT_SECRET:
+        return {"error": "Bybit API Key/Secret belum di-set di Secrets"}
 
-@app.route("/", methods=["GET", "POST"])
-def home():
-    if request.method == "POST":
-        user_msg = request.form["message"]
-        
-        payload = {
-            "inputs": user_msg,
-            "parameters": {"max_new_tokens": 150}
-        }
-        
-        try:
-            response = requests.post(API_URL, headers=headers, json=payload)
-            result = response.json()
-            
-            # Sistem pengecekan respon otomatis (agar terhindar dari error 'Expecting value')
-            if isinstance(result, list) and len(result) > 0:
-                ai_reply = result[0].get('generated_text', 'Format teks kosong').strip()
-            elif isinstance(result, dict):
-                if "estimated_time" in result:
-                    ai_reply = "Server Hugging Face sedang memuat model. Silakan kirim ulang pesan ini dalam 20 detik."
-                elif "error" in result:
-                    ai_reply = f"Pesan dari Hugging Face: {result['error']}"
-                else:
-                    ai_reply = str(result)
-            else:
-                ai_reply = f"Menerima respon tidak dikenal: {str(result)}"
-                
-        except Exception as e:
-            ai_reply = f"Terjadi kendala koneksi ke AI: {str(e)}"
+    params = params or {}
+    timestamp = str(int(time.time() * 1000))
+    params["api_key"] = BYBIT_KEY
+    params["timestamp"] = timestamp
+    params["recv_window"] = 5000
 
-        return render_template_string(HTML_TEMPLATE, user_msg=user_msg, ai_reply=ai_reply)
-        
-    return render_template_string(HTML_TEMPLATE)
+    query = urlencode(sorted(params.items()))
+    signature = hmac.new(
+        BYBIT_SECRET.encode("utf-8"),
+        query.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    params["sign"] = signature
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    url = f"{BYBIT_BASE}{endpoint}"
+    try:
+        if method == "GET":
+            res = requests.get(url, params=params, timeout=10)
+        else:
+            res = requests.post(url, data=params, timeout=10)
+        return res.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+def get_balance():
+    data = bybit_request("GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED"})
+    return data
+
+def get_positions():
+    data = bybit_request("GET", "/v5/position/list", {"category": "linear", "settleCoin": "USDT"})
+    return data
+
+# ===== Chat Function =====
+@spaces.GPU
+def chat(message, history, model_name):
+    if not message or not str(message).strip():
+        return "Pesan kosong."
+
+    lower_msg = message.lower()
+
+    # Command khusus
+    if "saldo" in lower_msg or "balance" in lower_msg:
+        bal = get_balance()
+        return f"📊 Hasil cek saldo Demo:\n\n```json\n{bal}\n```"
+
+    if "posisi" in lower_msg or "position" in lower_msg:
+        pos = get_positions()
+        return f"📈 Posisi saat ini:\n\n```json\n{pos}\n```"
+
+    # Normal chat ke joingonka
+    messages = []
+    if history:
+        for item in history:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                human, assistant = item
+                messages.append({"role": "user", "content": str(human)})
+                messages.append({"role": "assistant", "content": str(assistant)})
+            elif isinstance(item, dict):
+                messages.append(item)
+
+    messages.append({"role": "user", "content": str(message)})
+
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=2048
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"❌ Error LLM:\n\n{type(e).__name__}: {str(e)}"
+
+# ===== UI =====
+with gr.Blocks(title="Gonka + Bybit Demo") as demo:
+    gr.Markdown("# 🤖 Gonka AI + Bybit Demo")
+    gr.Markdown("Bisa ngobrol, cek saldo, dan cek posisi (Demo Account)")
+
+    model_dropdown = gr.Dropdown(
+        choices=[
+            "MiniMaxAI/MiniMax-M2.7",
+            "moonshotai/Kimi-K2.6",
+            "deepseek-ai/DeepSeek-V4-Flash-0731"
+        ],
+        value="MiniMaxAI/MiniMax-M2.7",
+        label="Pilih Model"
+    )
+
+    chatbot = gr.ChatInterface(
+        fn=chat,
+        additional_inputs=[model_dropdown],
+        examples=[
+            ["Halo", "MiniMaxAI/MiniMax-M2.7"],
+            ["Cek saldo saya", "MiniMaxAI/MiniMax-M2.7"],
+            ["Lihat posisi saya", "MiniMaxAI/MiniMax-M2.7"],
+            ["Analisis BTC sekarang", "MiniMaxAI/MiniMax-M2.7"]
+        ]
+    )
+
+demo.launch()
